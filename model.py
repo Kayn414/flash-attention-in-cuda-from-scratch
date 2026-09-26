@@ -203,8 +203,29 @@ __global__ void pv_matmul(const float* p, const float* v, float* out, int seq_le
     out[(size_t)row * head_dim + col] = sum;
 }
 
-# Step 12 - naive_attention (not yet solved)
-# TODO: implement
+# Step 12 - naive_attention
+void naive_attention(const float* d_q, const float* d_k, const float* d_v, float* d_out, int seq_len, int head_dim) {
+    // TODO: allocate scratch, launch qk_scores -> softmax_rows -> pv_matmul, free scratch
+    float* d_scores = nullptr;
+    size_t scores_bytes = (size_t)seq_len * seq_len * sizeof(float);
+    cudaMalloc(&d_scores, scores_bytes);
+
+    dim3 threads2d(16,16);
+    dim3 qk_blocks((seq_len + threads2d.x - 1) / threads2d.x,
+                    (seq_len + threads2d.y - 1) / threads2d.y);
+    qk_scores<<<qk_blocks, threads2d>>>(d_q, d_k, d_scores, seq_len, head_dim);
+
+    int sm_threads = 256;
+    int sm_blocks = seq_len;
+    size_t sm_shmem = sm_threads * sizeof(float);
+    softmax_rows<<<sm_blocks, sm_threads, sm_shmem>>>(d_scores, seq_len, seq_len);
+
+    dim3 pv_blocks((head_dim + threads2d.x - 1) / threads2d.x,
+                    (seq_len + threads2d.y - 1) / threads2d.y );
+    pv_matmul<<<pv_blocks, threads2d>>>(d_scores, d_v, d_out, seq_len, head_dim);
+
+    cudaFree(d_scores);
+}
 
 # Step 13 - online_max (not yet solved)
 # TODO: implement
