@@ -17,8 +17,16 @@ __global__ void vector_add(const float* a, const float* b, float* c, int n) {
     
 }
 
-# Step 2 - scale_array (not yet solved)
-# TODO: implement
+# Step 2 - scale_array
+__global__ void scale_array(float* a, float scalar, int n) {
+    // TODO: multiply each element of a by scalar in place
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;              // total threads in the grid
+   
+    for (int i = idx; i < n; i += stride) {
+        a[i] = a[i] * scalar;
+    }
+}
 
 # Step 3 - elementwise_exp (not yet solved)
 # TODO: implement
