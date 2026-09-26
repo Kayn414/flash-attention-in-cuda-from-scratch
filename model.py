@@ -88,8 +88,16 @@ __global__ void row_sum(const float* matrix, float* out, int rows, int cols) {
     
 }
 
-# Step 6 - dot_product (not yet solved)
-# TODO: implement
+# Step 6 - dot_product
+__device__ float dot_product(const float* a, const float* b, int n) {
+    // TODO: return the dot product of a and b
+    float product = 0.0f;
+    for (int i = 0; i < n; i++) {
+        product += a[i] * b[i];
+    }
+
+    return product; 
+}
 
 # Step 7 - matmul (not yet solved)
 # TODO: implement
