@@ -99,8 +99,21 @@ __device__ float dot_product(const float* a, const float* b, int n) {
     return product; 
 }
 
-# Step 7 - matmul (not yet solved)
-# TODO: implement
+# Step 7 - matmul
+__global__ void matmul(const float* a, const float* b, float* c, int m, int k, int n) {
+    // TODO: compute C = A * B for row-major matrices
+    int row = blockIdx.y * blockDim.y + threadIdx.y;   // which row of C (0..m-1)
+    int col = blockIdx.x * blockDim.x + threadIdx.x;   // which col of C (0..n-1)
+    
+    if (row >= m || col >= n) return;
+    
+    float sum = 0.0f;
+    for (int i = 0; i < k; i++){
+        sum += a[(size_t)row * k + i] * b[(size_t)i * n + col];
+    }
+
+    c[(size_t)row * n + col] = sum;
+}
 
 # Step 8 - transpose (not yet solved)
 # TODO: implement
