@@ -38,8 +38,24 @@ __global__ void elementwise_exp(float* a, int n) {
     }
 }
 
-# Step 4 - row_max (not yet solved)
-# TODO: implement
+# Step 4 - row_max
+#include <cuda_runtime.h>
+#include <cfloat>
+
+__global__ void row_max(const float* matrix, float* out, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row >= rows) return;
+
+    const float* row_in = matrix + (size_t)row * cols;
+    float m = -FLT_MAX;
+    for (int c = 0; c < cols; c++) {
+        m = fmaxf(m, row_in[c]);
+    }
+
+    out[row] = m;
+
+}
 
 # Step 5 - row_sum (not yet solved)
 # TODO: implement
