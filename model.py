@@ -501,6 +501,82 @@ __device__ void causal_mask(float* s_tile, int q_row_start, int k_col_start,
     }
 }
 
-# Step 26 - flash_attention_causal_kernel (not yet solved)
-# TODO: implement
+# Step 26 - flash_attention_causal_kernel
+__global__ void flash_attention_causal_kernel(const float* q, const float* k, const float* v,
+                                                float* out, int seq_len, int head_dim,
+                                                int tile_q, int tile_k, float scale) {
+    // TODO: tiled causal flash attention using shared memory and online softmax
+    extern __shared__ float smem[];
+
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+
+    float* q_sh = smem;
+    float* k_sh = q_sh + tile_q * head_dim;
+    float* v_sh = k_sh + tile_k * head_dim;
+    float* s_sh = v_sh + tile_k * head_dim;
+    float* o_sh = s_sh + tile_q * tile_k;
+    float* m_sh = o_sh + tile_q * head_dim;
+    float* l_sh = m_sh + tile_q;
+    float* mt_sh = l_sh + tile_q;
+    float* ts_sh = mt_sh + tile_q;
+
+    int q_start = blockIdx.x * tile_q;
+    if (q_start >= seq_len) return;
+    int q_end  = min(tile_q, seq_len - q_start);
+
+    load_tile(q, q_sh, q_start, 0, seq_len, head_dim, q_end, head_dim, tid, nthreads);
+    for (int r = tid; r < q_end; r += nthreads) {m_sh[r] = -FLT_MAX; l_sh[r] = 0.0f;}
+    for (int e = tid; e < q_end * head_dim; e += nthreads) o_sh[e] =0.0f;
+    __syncthreads();
+
+    int last_q = q_start + q_end - 1;
+    int max_tile = last_q / tile_k;
+    for (int t = 0; t <= max_tile; t++) {
+        int k_start = t * tile_k;
+        int k_eff   = min(tile_k, seq_len - k_start);
+
+        load_tile(k, k_sh, k_start, 0, seq_len, head_dim, k_eff, head_dim, tid, nthreads);
+        load_tile(v, v_sh, k_start, 0, seq_len, head_dim, k_eff, head_dim, tid, nthreads);
+        __syncthreads();
+
+        tile_scores(q_sh, k_sh, s_sh, q_end, k_eff, head_dim, scale, tid, nthreads);
+        __syncthreads();
+
+        // causal mask BEFORE the max (so future keys can't win the max or leak into exp)
+        causal_mask(s_sh, q_start, k_start, q_end, k_eff, tid, nthreads);
+        __syncthreads();
+
+        tile_rowmax(s_sh, mt_sh, q_end, k_eff, tid, nthreads);
+        __syncthreads();
+
+        // online max + correction: rescale accumulator and running sum, then commit new max
+        for (int r = tid; r < q_end; r += nthreads) {
+            float m_old = m_sh[r];
+            float m_new = online_max(m_old, mt_sh[r]);
+            float corr  = expf(m_old - m_new);
+            l_sh[r] *= corr;
+            rescale_output(o_sh + (size_t)r * head_dim, head_dim, corr);
+            m_sh[r] = m_new;
+        }
+        __syncthreads();
+
+        tile_exp(s_sh, m_sh, q_end, k_eff, tid, nthreads);        // p = exp(s - m_new)
+        __syncthreads();
+
+        tile_rowsum(s_sh, ts_sh, q_end, k_eff, tid, nthreads);
+        __syncthreads();
+        for (int r = tid; r < q_end; r += nthreads) l_sh[r] += ts_sh[r];
+
+        accumulate_pv(s_sh, v_sh, o_sh, q_end, k_eff, head_dim, tid, nthreads);
+        __syncthreads();
+    }
+
+    // finalize: divide accumulator by running sum, write to global out
+    for (int e = tid; e < q_end * head_dim; e += nthreads) {
+        int i = e / head_dim, d = e % head_dim;
+        out[(size_t)(q_start + i) * head_dim + d] = o_sh[e] / l_sh[i];
+    }
+
+    }
 
