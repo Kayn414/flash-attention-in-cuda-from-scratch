@@ -374,8 +374,89 @@ __device__ void accumulate_pv(const float* p_tile, const float* v_tile, float* o
     }
 }
 
-# Step 23 - flash_attention_kernel (not yet solved)
-# TODO: implement
+# Step 23 - flash_attention_kernel
+__global__ void flash_attention_kernel(const float* q, const float* k, const float* v,
+                                       float* out, int seq_len, int head_dim,
+                                       int tile_q, int tile_k, float scale) {
+    // TODO: tiled fused attention using shared memory and online softmax.
+    extern __shared__ float smem[];                 // one dynamic buffer, carved below
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+
+    // --- carve shared memory ---
+    float* q_sh = smem;                             // tile_q * head_dim  (this block's queries)
+    float* k_sh = q_sh + tile_q * head_dim;         // tile_k * head_dim  (current key tile)
+    float* v_sh = k_sh + tile_k * head_dim;         // tile_k * head_dim  (current value tile)
+    float* s_sh = v_sh + tile_k * head_dim;         // tile_q * tile_k    (scores scratch)
+    float* o_sh = s_sh + tile_q * tile_k;           // tile_q * head_dim  (output accumulator)
+    float* m_sh = o_sh + tile_q * head_dim;         // tile_q  (running max per query row)
+    float* l_sh = m_sh + tile_q;                    // tile_q  (running sum per query row)
+    float* mt_sh = l_sh + tile_q;                   // tile_q  (this tile's max per row)
+    float* ts_sh = mt_sh + tile_q;                  // tile_q  (this tile's sum per row)
+
+    // --- which query rows does this block own? ---
+    int q_start = blockIdx.x * tile_q;
+    if (q_start >= seq_len) return;
+    int q_eff = min(tile_q, seq_len - q_start);     // partial last query tile
+
+    // --- load this block's Q tile once, init running state ---
+    load_tile(q, q_sh, q_start, 0, seq_len, head_dim, q_eff, head_dim, tid, nthreads);
+    for (int r = tid; r < q_eff; r += nthreads) { m_sh[r] = -FLT_MAX; l_sh[r] = 0.0f; }
+    for (int t = tid; t < q_eff * head_dim; t += nthreads) o_sh[t] = 0.0f;
+    __syncthreads();
+
+    // --- sequential loop over KEY/VALUE tiles: count = ceil(seq_len / tile_k) ---
+    int num_tiles = (seq_len + tile_k - 1) / tile_k;
+    for (int t = 0; t < num_tiles; t++) {
+        int k_start = t * tile_k;
+        int k_eff = min(tile_k, seq_len - k_start);          // partial last key tile
+
+        // 1) load K,V tiles
+        load_tile(k, k_sh, k_start, 0, seq_len, head_dim, k_eff, head_dim, tid, nthreads);
+        load_tile(v, v_sh, k_start, 0, seq_len, head_dim, k_eff, head_dim, tid, nthreads);
+        __syncthreads();
+
+        // 2) scores = scale * Q·Kᵀ   (per cell, width = k_eff)
+        tile_scores(q_sh, k_sh, s_sh, q_eff, k_eff, head_dim, scale, tid, nthreads);
+        __syncthreads();
+
+        // 3) this tile's row max
+        tile_rowmax(s_sh, mt_sh, q_eff, k_eff, tid, nthreads);
+        __syncthreads();
+
+        // 4+5) online max, correction, rescale accumulator & running sum  (per row)
+        for (int r = tid; r < q_eff; r += nthreads) {
+            float m_old = m_sh[r];
+            float m_new = online_max(m_old, mt_sh[r]);        // fmaxf
+            float corr  = expf(m_old - m_new);                // <= 1 (0 on first tile)
+            l_sh[r] *= corr;                                  // fix running denominator
+            rescale_output(o_sh + (size_t)r * head_dim, head_dim, corr);  // fix accumulator
+            m_sh[r] = m_new;                                  // commit new running max
+        }
+        __syncthreads();
+
+        // 6) p_tile = exp(s - m_new)   (per cell, in place on s_sh)
+        tile_exp(s_sh, m_sh, q_eff, k_eff, tid, nthreads);
+        __syncthreads();
+
+        // 7) this tile's row sum, folded into running sum
+        tile_rowsum(s_sh, ts_sh, q_eff, k_eff, tid, nthreads);
+        __syncthreads();
+        for (int r = tid; r < q_eff; r += nthreads) l_sh[r] += ts_sh[r];
+
+        // 8) out_acc += p_tile · v_tile   (per cell)
+        accumulate_pv(s_sh, v_sh, o_sh, q_eff, k_eff, head_dim, tid, nthreads);
+        __syncthreads();
+    }
+
+    // --- finalize: divide accumulator by running sum, write to global ---
+    for (int t = tid; t < q_eff * head_dim; t += nthreads) {
+        int i = t / head_dim, d = t % head_dim;
+        out[(size_t)(q_start + i) * head_dim + d] = o_sh[t] / l_sh[i];
+    }
+
+
+}
 
 # Step 24 - flash_attention_launcher (not yet solved)
 # TODO: implement
