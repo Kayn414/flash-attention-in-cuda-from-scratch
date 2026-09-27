@@ -239,8 +239,12 @@ __device__ float correction_factor(float old_max, float new_max) {
     return expf(old_max - new_max);
 }
 
-# Step 15 - update_running_sum (not yet solved)
-# TODO: implement
+# Step 15 - update_running_sum
+__device__ float update_running_sum(float old_sum, float correction, float block_sum) {
+    // TODO: combine the rescaled old sum with the new block sum
+    float z_new = correction * old_sum + block_sum;
+    return z_new;
+}
 
 # Step 16 - rescale_output (not yet solved)
 # TODO: implement
